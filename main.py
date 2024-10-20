@@ -6,6 +6,14 @@ from matplotlib.transforms import Affine2D
 from typing import List, Tuple, Dict
 import dataclasses
 
+# Explanation:
+#
+# The class <-> component relationship is described here:
+# LIDARSimulator -> ray casting
+# CarController -> given lidar data, return steering angle
+# CarKinematics -> kinematic model
+# TrackVisualizer -> draw track, car, obstacles, etc.
+
 # Data structures for the simulation
 @dataclasses.dataclass
 class CarState:
