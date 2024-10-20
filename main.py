@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle, Circle
+from matplotlib.patches import Rectangle, Circle, Polygon
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 from matplotlib.transforms import Affine2D
 from typing import List, Tuple, Dict
@@ -16,9 +16,41 @@ class CarState:
 
 @dataclasses.dataclass
 class TrackConfig:
-    bounds: Tuple[Tuple[float, float], Tuple[float, float]]  # ((x_min, x_max), (y_min, y_max))
-    obstacles: List[Tuple[float, float, float]]  # List of (x, y, radius) for circular obstacles
-    track_points: List[Tuple[float, float]]  # Points defining the track centerline
+    bounds: Tuple[Tuple[float, float], Tuple[float, float]]
+    obstacles: List[Tuple[float, float, float]]
+    track_width: float  # Added track width parameter
+    inner_boundary: np.ndarray  # Array of (x, y) points for inner boundary
+    outer_boundary: np.ndarray  # Array of (x, y) points for outer boundary
+
+def generate_track_boundaries(centerline_points: List[Tuple[float, float]], track_width: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate inner and outer track boundaries from centerline points."""
+    points = np.array(centerline_points)
+    inner_boundary = []
+    outer_boundary = []
+
+    # Convert points to numpy array for easier manipulation
+    points = np.array(points)
+
+    for i in range(len(points)):
+        # Get current point and next point (wrap around to first point if at end)
+        current = points[i]
+        next_point = points[(i + 1) % len(points)]
+
+        # Calculate direction vector
+        direction = next_point - current
+        direction = direction / np.linalg.norm(direction)
+
+        # Calculate normal vector (rotate direction 90 degrees)
+        normal = np.array([-direction[1], direction[0]])
+
+        # Generate inner and outer points
+        inner_point = current - normal * (track_width / 2)
+        outer_point = current + normal * (track_width / 2)
+
+        inner_boundary.append(inner_point)
+        outer_boundary.append(outer_point)
+    
+    return np.array(inner_boundary), np.array(outer_boundary)
 
 class LIDARSimulator:
     """Placeholder for the LIDAR simulation component"""
@@ -79,9 +111,16 @@ class TrackVisualizer:
         self.draw_obstacles()
 
     def draw_track(self):
-        """Draw the track"""
-        track_points = np.array(self.track_config.track_points)
-        self.ax.plot(track_points[:, 0], track_points[:, 1], 'k--', alpha=0.5)
+        """Draw the track with filled area between boundaries"""
+        # Create a polygon that represents the track
+        track_polygon = np.vstack([
+            self.track_config.outer_boundary,
+            np.flipud(self.track_config.inner_boundary)
+        ])
+
+        # Draw the track as a filled polygon
+        track = Polygon(track_polygon, facecolor='lightgray', edgecolor='black')
+        self.ax.add_patch(track)
 
     def draw_obstacles(self):
         """Draw the obstacles"""
@@ -99,11 +138,20 @@ class TrackVisualizer:
         self.car.set_transform(self.ax.transData + plt.matplotlib.transforms.Affine2D(transform))
 
 def main():
+    # Define centerline points for the track
+    centerline_points = [(0, 0), (3, 3), (3, -3), (-3, -3), (-3, 3), (0, 0)]
+    track_width = 1.0  # Define track width
+    
+    # Generate track boundaries
+    inner_boundary, outer_boundary = generate_track_boundaries(centerline_points, track_width)
+    
     # Create track configuration
     track_config = TrackConfig(
         bounds=((-5, 5), (-5, 5)),
         obstacles=[(2, 2, 0.5), (-2, -2, 0.5), (2, -2, 0.3)],
-        track_points=[(0, 0), (3, 3), (3, -3), (-3, -3), (-3, 3), (0, 0)]
+        track_width=track_width,
+        inner_boundary=inner_boundary,
+        outer_boundary=outer_boundary
     )
 
     # Initialize components
@@ -117,7 +165,7 @@ def main():
 
     def init():
         """Initialize animation"""
-        return (visualizer.car)
+        return (visualizer.car,)
 
     def update(frame):
         """Update animation frame"""
@@ -134,8 +182,7 @@ def main():
 
         # Update visualization
         visualizer.update_visualization(car_state)
-
-        return (visualizer.car)
+        return (visualizer.car,)
 
     def savemp4(ani):
         Writer = FFMpegWriter(fps=20, metadata=dict(artist='Me'), bitrate=1800)
