@@ -73,24 +73,58 @@ class LIDARSimulator:
         return np.ones(self.num_beams) * self.max_range
 
 class CarController:
-    """Placeholder for the car decision making component"""
+    def __init__(self, gap_threshold: float = 3.0, num_beams: int = 180, angle_span: float = np.pi):
+        self.gap_threshold = gap_threshold
+        self.num_beams = num_beams
+        self.angle_span = angle_span
+
     def get_steering_angle(self, lidar_data: np.ndarray) -> float:
-        """Placeholder for steering decision function"""
-        # TO-DO
-        return 0.0
+        """Steer the car towards the maximum gap in the LIDAR data"""
+        # Get angle array for LIDAR data
+        angle_array = np.arange(start=-self.angle_span/2, stop=self.angle_span/2, step=self.angle_span/(self.num_beams-1))
+        if lidar_data.shape != angle_array.shape:
+            raise ValueError("LIDAR data shape must match angle array shape")
+        
+        # Split LIDAR data into segments based on gap threshold
+        free_segments = np.split(lidar_data, np.where(lidar_data < self.gap_threshold)[0])
+
+        # Find the longest free segment
+        max_gap = max(free_segments, key=len, default=[])
+
+        # Find the center index of the longest free segment
+        start_idx = lidar_data.tolist().index(max_gap[0])
+        best_idx = int(start_idx + len(max_gap) / 2)
+        return angle_array[best_idx]
 
 class CarKinematics:
-    """Placeholder for car position updating component"""
-    def __init__(self, velocity: float = 1.0):
+    def __init__(self, car_length: float = 0.4, velocity: float = 1.0, dt: float = 0.05, x_std: float = 0.01, y_std: float = 0.01, theta_std: float = 0.01):
+        self.car_length = car_length
         self.velocity = velocity
+        self.dt = dt
+        self.x_std = x_std
+        self.y_std = y_std
+        self.theta_std = theta_std
+        self.state_history = []
 
-    def update_state(self, current_state: CarState, steering_angle: float, dt: float) -> CarState:
-        """Placeholder for kinematic model function"""
-        # Simple circular motion for testing
-        omega = 0.5  # angular velocity
-        new_theta = current_state.theta + omega * dt
-        new_x = current_state.x - self.velocity * np.sin(new_theta) * dt
-        new_y = current_state.y + self.velocity * np.cos(new_theta) * dt
+    def update_state(self, current_state: CarState, steering_angle: float) -> CarState:
+        """Update the car state using the kinematic model"""
+        # Store old state in state history
+        self.state_history.append(current_state)
+
+        # Avoid instability for very small steering angles
+        if abs(steering_angle) < 1e-2:
+            steering_angle = 0.0
+
+        # Update state with Gaussian noise
+        x, y, theta = current_state.x, current_state.y, current_state.theta
+        new_theta = theta + self.velocity / self.car_length * np.tan(steering_angle) * self.dt + np.random.normal(0, self.theta_std)
+        if steering_angle == 0:
+            new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
+            new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
+        else:
+            new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
+            new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
+
         return CarState(new_x, new_y, new_theta, steering_angle)
 
 class TrackVisualizer:
