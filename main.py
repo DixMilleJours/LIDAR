@@ -67,10 +67,135 @@ class LIDARSimulator:
         self.max_range = max_range
         self.angle_span = angle_span
 
+    def get_lidar_origin(self, car_state):
+    """Get lidar origin at front edge, equidistant from left and right side"""
+
+        # given that car position is measured from rear axle
+        x_offset = (self.car_height) * np.cos(car_state.theta)
+        y_offset = (self.car_height) * np.sin(car_state.theta)
+
+        # add offset to given car position to locate sensor origin
+        lidar_pos = np.array([car_state.x + x_offset, car_state.y + y_offset])
+
+        return lidar_pos
+
+    def generate_rays(self, car_state):
+        """Generate endpoints for each ray"""
+
+        ray_endpoint = np.zeros((self.num_beams, 2))
+
+        # obtain angles at which rays occur at and offset by car angle
+        angles = np.linspace(0, self.angle_span, self.num_beams) + car_state.theta
+
+        # get coordinates of endpoints for each ray
+        for j in range(len(angles)):
+            ray_endpoint[j ,0] = self.max_range * np.cos(angles[j])
+            ray_endpoint[j ,1] = self.max_range * np.sin(angles[j])
+
+        return ray_endpoint
+
+    def boundary_intersection(self, p0, p1, p2, p3):
+        """Get intersection coordinates of the ray and the track edges (line segment)"""
+
+        # p0 and p1 define start and end of LIDAR ray
+        # p2 and p3 define start and end of boundary segment
+        s1 = p1 - p0
+        s2 = p3 - p2
+
+        # calculate determinant of sys of eq
+        det = -s1[0]*s2[1] + s2[0]*s1[1]
+
+        # if det = 0, parallel, no intersection; return max_range value
+        if det == 0: 
+            return self.max_range
+
+        # calculate t and u values at which the points intersect
+        t = ( -s2[1]*(p2[0] - p0[0]) + s2[0]*(p2[1] - p0[1]) )/det
+        u = ( s1[0]*(p2[1] - p2[1]) + s1[1]*(p2[0] - p0[0]) )/det
+
+        # calculate intersection point
+        if 0 <= u <= 1 and t >= 0:
+            POI = p0 + t*s1
+            return POI          # POI has x and y coordinates
+        
+        # no intersection, return max_range
+        return self.max_range
+
+    def obstacle_intersection(self, p0, p1, obstacle):
+        """Get intersection coordinates of the ray and the obstacles"""
+
+        s = p1 - p0
+
+        # unpack obstacle center coordinates and radius
+        h = obstacle[0]; k = obstacle[1]; r = obstacle[2]
+
+        # calculate quadratic constants
+        A = s[0]^2 + s[1]^2
+        B = 2*( (p0[0] - h)*s[0] + (p0[1] - k)*s[1] )
+        C = ( (p0[0] - h)**2 + (p0[1] - k)**2 - r**2 )
+
+        discriminant = B**2 - 4*A*C
+
+        if discriminant < 0:        # if negative sqrt, no intersection, return max_range value
+            return self.max_range
+        if discriminant == 0:
+            t = -B / (2*A)
+        if discriminant > 0:
+            t1 = (-B + np.sqrt(discriminant)) / (2*A)
+            t2 = (-B - np.sqrt(discriminant)) / (2*A)
+            t = min(t1, t2)     # smaller t value intersects obstacle first
+        
+        POI = p0 + t*s
+        return POI      # POI has x and y coordinates
+
+    def calc_distance(lidar_pos, POI):
+        """Calculate distance between two points"""
+
+        distance = np.sqrt( (POI[0] - lidar_pos[0])**2 + (POI[1] - lidar_pos[1])**2 )
+        return distance
+
     def get_distances(self, car_state: CarState, track_config: TrackConfig) -> np.ndarray:
-        """Placeholder for ray tracing function"""
-        # Returns array of distances for each beam
-        return np.ones(self.num_beams) * self.max_range
+        """Calculate the min distance between lidar origin and obstacles"""
+
+        # get lidar coordinates
+        lidar_pos = get_lidar_origin(self, car_state)
+
+        # generate rays
+        ray_endpoint = generate_rays(self, car_state)
+
+        # initialize bins with max_range values
+        dist = np.ones(self.num_beams) * self.max_range
+
+        for i in range(len(dist)):      # iterate over each ray
+            ray = ray_endpoint[i, :]
+
+            # check for intersecting points with inner boundary
+            for q in range(len(track_config.inner_boundary) - 1):   
+                POI = boundary_intersection(self, lidar_pos, ray, track_config.inner_boundary[q, :], 
+                                            track_config.inner_boundary[q + 1, :])
+                distance = calc_distance(lidar_pos, POI)
+
+                # take the minimum distance
+                dist[i] = min(dist[i], distance)
+
+            # check for intersecting points with outer boundary
+            for m in track_config.outer_boundary:
+                POI = boundary_intersection(self, lidar_pos, ray, track_config.outer_boundary[m, :], 
+                                            track_config.outer_boundary[m + 1, :])                
+                distance = calc_distance(lidar_pos, POI)
+
+                # take the minimum distance
+                dist[i] = min(dist[i], distance)
+            
+            # check for intersecting points with obstacles (list)
+            for obst in track_config.obstacles:
+                POI = obstacle_intersection(self, lidar_pos, ray, obst)               
+                distance = calc_distance(lidar_pos, POI)
+
+                # take the minimum distance
+                dist[i] = min(dist[i], distance)
+
+        return dist
 
 class CarController:
     def __init__(self, gap_threshold: float = 3.0, num_beams: int = 180, angle_span: float = np.pi):
