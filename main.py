@@ -68,7 +68,7 @@ class LIDARSimulator:
         self.angle_span = angle_span
 
     def get_lidar_origin(self, car_state):
-    """Get lidar origin at front edge, equidistant from left and right side"""
+        """Get lidar origin at front edge, equidistant from left and right side"""
 
         # given that car position is measured from rear axle
         x_offset = (self.car_height) * np.cos(car_state.theta)
@@ -158,10 +158,10 @@ class LIDARSimulator:
         """Calculate the min distance between lidar origin and obstacles"""
 
         # get lidar coordinates
-        lidar_pos = get_lidar_origin(self, car_state)
+        lidar_pos = self.get_lidar_origin(self, car_state)
 
         # generate rays
-        ray_endpoint = generate_rays(self, car_state)
+        ray_endpoint = self.generate_rays(self, car_state)
 
         # initialize bins with max_range values
         dist = np.ones(self.num_beams) * self.max_range
@@ -171,26 +171,26 @@ class LIDARSimulator:
 
             # check for intersecting points with inner boundary
             for q in range(len(track_config.inner_boundary) - 1):   
-                POI = boundary_intersection(self, lidar_pos, ray, track_config.inner_boundary[q, :], 
+                POI = self.boundary_intersection(self, lidar_pos, ray, track_config.inner_boundary[q, :], 
                                             track_config.inner_boundary[q + 1, :])
-                distance = calc_distance(lidar_pos, POI)
+                distance = self.calc_distance(lidar_pos, POI)
 
                 # take the minimum distance
                 dist[i] = min(dist[i], distance)
 
             # check for intersecting points with outer boundary
             for m in track_config.outer_boundary:
-                POI = boundary_intersection(self, lidar_pos, ray, track_config.outer_boundary[m, :], 
+                POI = self.boundary_intersection(self, lidar_pos, ray, track_config.outer_boundary[m, :], 
                                             track_config.outer_boundary[m + 1, :])                
-                distance = calc_distance(lidar_pos, POI)
+                distance = self.calc_distance(lidar_pos, POI)
 
                 # take the minimum distance
                 dist[i] = min(dist[i], distance)
             
             # check for intersecting points with obstacles (list)
             for obst in track_config.obstacles:
-                POI = obstacle_intersection(self, lidar_pos, ray, obst)               
-                distance = calc_distance(lidar_pos, POI)
+                POI = self.obstacle_intersection(self, lidar_pos, ray, obst)               
+                distance = self.calc_distance(lidar_pos, POI)
 
                 # take the minimum distance
                 dist[i] = min(dist[i], distance)
