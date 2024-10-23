@@ -62,10 +62,13 @@ def generate_track_boundaries(centerline_points: List[Tuple[float, float]], trac
 
 class LIDARSimulator:
     """Placeholder for the LIDAR simulation component"""
-    def __init__(self, num_beams: int = 180, max_range: float = 10.0, angle_span: float = np.pi):
+    def __init__(self, num_beams: int = 180, max_range: float = 10.0, angle_span: float = np.pi, 
+                car_height: float = 5, car_width: float = 5):
         self.num_beams = num_beams
         self.max_range = max_range
         self.angle_span = angle_span
+        self.car_height = car_height
+        self.car_width = car_width
 
     def get_lidar_origin(self, car_state):
         """Get lidar origin at front edge, equidistant from left and right side"""
@@ -79,18 +82,21 @@ class LIDARSimulator:
 
         return lidar_pos
 
-    def generate_rays(self, car_state):
+    def generate_rays(self, car_state, lidar_pos):
         """Generate endpoints for each ray"""
 
+        # initial ray starting point
         ray_endpoint = np.zeros((self.num_beams, 2))
+        ray_endpoint[:, 0] = lidar_pos[0]
+        ray_endpoint[:, 1] = lidar_pos[1]
 
         # obtain angles at which rays occur at and offset by car angle
         angles = np.linspace(0, self.angle_span, self.num_beams) + car_state.theta
 
         # get coordinates of endpoints for each ray
         for j in range(len(angles)):
-            ray_endpoint[j ,0] = self.max_range * np.cos(angles[j])
-            ray_endpoint[j ,1] = self.max_range * np.sin(angles[j])
+            ray_endpoint[j ,0] += self.max_range * np.cos(angles[j])
+            ray_endpoint[j ,1] += self.max_range * np.sin(angles[j])
 
         return ray_endpoint
 
