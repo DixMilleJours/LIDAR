@@ -316,13 +316,16 @@ class CarKinematics:
 
         # Update state with Gaussian noise
         x, y, theta = current_state.x, current_state.y, current_state.theta
+        new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
+        new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
         new_theta = theta + self.velocity / self.car_length * np.tan(steering_angle) * self.dt + np.random.normal(0, self.theta_std)
-        if steering_angle == 0:
-            new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
-            new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
-        else:
-            new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
-            new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
+        # new_theta = theta + self.velocity / self.car_length * np.tan(steering_angle) * self.dt + np.random.normal(0, self.theta_std)
+        # if steering_angle == 0:
+        #     new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
+        #     new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
+        # else:
+        #     new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
+        #     new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
 
         return CarState(new_x, new_y, new_theta, steering_angle)
 
@@ -414,22 +417,23 @@ def main():
     )
 
     # Initialize components with tuned parameters
+    car_length = 0.1
     visualizer = TrackVisualizer(track_config)
     lidar = LIDARSimulator(
         num_beams=180,
         angle_span=np.pi * 2/3,  # 120 degree field of view
         max_range=5.0,
-        car_length=0.4,
+        car_length=car_length,
         car_width=0.2
     )
     controller = CarController(
-        gap_threshold=1.0,
+        gap_threshold=0.25,
         num_beams=180,
         angle_span=np.pi * 2/3  # Match LIDAR's angle span
     )
     kinematics = CarKinematics(
-        car_length=0.4,
-        velocity=0.5,  # Reduced velocity for better control
+        car_length=car_length,
+        velocity=0.8,  # Reduced velocity for better control
         dt=0.05,
         x_std=0.001,   # Reduced noise for smoother motion
         y_std=0.001,
