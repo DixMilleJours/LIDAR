@@ -334,7 +334,7 @@ class CarKinematics:
         # else:
         #     new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
         #     new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
-        print(f"new_x: {new_x}, new_y: {new_y}, new_theta: {new_theta}, steering_angle: {steering_angle}")
+
         return CarState(new_x, new_y, new_theta, steering_angle)
 
 class TrackVisualizer:
@@ -441,7 +441,7 @@ def main():
     )
     kinematics = CarKinematics(
         car_length=car_length,
-        velocity=1.0,  # Reduced velocity for better control
+        velocity=0.8,  # Reduced velocity for better control
         dt=0.05,
         x_std=0.001,   # Reduced noise for smoother motion
         y_std=0.001,
