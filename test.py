@@ -259,12 +259,14 @@ class LIDARSimulator:
         return ray_start + direction * t
 
 class CarController:
-    def __init__(self, gap_threshold: float = 3.0, num_beams: int = 180, angle_span: float = np.pi):
+    def __init__(self, gap_threshold: float = 3.0, num_beams: int = 180, angle_span: float = np.pi, ratio: float = 0.95):
         self.gap_threshold = gap_threshold
         self.num_beams = num_beams
         self.angle_span = angle_span  # This should match LIDAR's angle_span
+        self.ratio = ratio
 
     def get_steering_angle(self, lidar_data: np.ndarray) -> float:
+        # print(f"lidar_data: {lidar_data}")
         """Steer the car towards the maximum gap in the LIDAR data"""
         # Create angle array matching LIDAR's angle distribution
         angle_array = np.linspace(-self.angle_span/2, self.angle_span/2, self.num_beams)
@@ -272,7 +274,7 @@ class CarController:
         # Add shape check with more informative error message
         if lidar_data.shape[0] != angle_array.shape[0]:
             raise ValueError(f"LIDAR data shape {lidar_data.shape} must match angle array shape {angle_array.shape}")
-        
+
         # Split LIDAR data into segments based on gap threshold
         gaps = lidar_data > self.gap_threshold
         gap_indices = np.where(gaps)[0]
@@ -291,9 +293,15 @@ class CarController:
         start_idx = gap_indices[gap_starts[longest_gap_idx]]
         end_idx = gap_indices[gap_ends[longest_gap_idx]]
         
+        # Find the furthest point in the gap
+        best_idx = np.argmax(lidar_data[start_idx:end_idx+1]) + start_idx
+
         # Calculate center of the longest gap
         center_idx = (start_idx + end_idx) // 2
-        return angle_array[center_idx]
+
+        # Use a weighted average of the center and best points
+        steering_angle = angle_array[int(self.ratio*center_idx + (1-self.ratio)*best_idx)]
+        return steering_angle
 
 class CarKinematics:
     def __init__(self, car_length: float = 0.4, velocity: float = 1.0, dt: float = 0.05, x_std: float = 0.01, y_std: float = 0.01, theta_std: float = 0.01):
@@ -316,14 +324,17 @@ class CarKinematics:
 
         # Update state with Gaussian noise
         x, y, theta = current_state.x, current_state.y, current_state.theta
+        new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
+        new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
         new_theta = theta + self.velocity / self.car_length * np.tan(steering_angle) * self.dt + np.random.normal(0, self.theta_std)
-        if steering_angle == 0:
-            new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
-            new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
-        else:
-            new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
-            new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
-
+        # new_theta = theta + self.velocity / self.car_length * np.tan(steering_angle) * self.dt + np.random.normal(0, self.theta_std)
+        # if steering_angle == 0:
+        #     new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
+        #     new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
+        # else:
+        #     new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
+        #     new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
+        print(f"new_x: {new_x}, new_y: {new_y}, new_theta: {new_theta}, steering_angle: {steering_angle}")
         return CarState(new_x, new_y, new_theta, steering_angle)
 
 class TrackVisualizer:
@@ -414,22 +425,23 @@ def main():
     )
 
     # Initialize components with tuned parameters
+    car_length = 0.1
     visualizer = TrackVisualizer(track_config)
     lidar = LIDARSimulator(
         num_beams=180,
         angle_span=np.pi * 2/3,  # 120 degree field of view
         max_range=5.0,
-        car_length=0.4,
+        car_length=car_length,
         car_width=0.2
     )
     controller = CarController(
-        gap_threshold=1.0,
+        gap_threshold=0.25,
         num_beams=180,
         angle_span=np.pi * 2/3  # Match LIDAR's angle span
     )
     kinematics = CarKinematics(
-        car_length=0.4,
-        velocity=0.5,  # Reduced velocity for better control
+        car_length=car_length,
+        velocity=1.0,  # Reduced velocity for better control
         dt=0.05,
         x_std=0.001,   # Reduced noise for smoother motion
         y_std=0.001,

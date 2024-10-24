@@ -8,3 +8,4 @@
 2. If okay with the changes, run `git add .`
 3. Then, run `git commit -m "a short msg to describe your change"`
 4. Finally, run `git push`. Copy the command shown in the terminal to set upstream correctly.
+5. If no copy option from step 4, just do `git push --set-upstream origin replace_with_your_branch`
