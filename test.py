@@ -353,15 +353,19 @@ class TrackVisualizer:
 
     def draw_track(self):
         """Draw the track with filled area between boundaries"""
-        # Create a polygon that represents the track
-        track_polygon = np.vstack([
-            self.track_config.outer_boundary,
-            np.flipud(self.track_config.inner_boundary)
-        ])
-
-        # Draw the track as a filled polygon
-        track = Polygon(track_polygon, facecolor='lightgray', edgecolor='black')
-        self.ax.add_patch(track)
+        # Draw outer boundary
+        outer_track = Polygon(self.track_config.outer_boundary,
+                            facecolor='lightgray',
+                            edgecolor='black',
+                            fill=True)
+        self.ax.add_patch(outer_track)
+        
+        # Draw inner boundary (the hole)
+        inner_track = Polygon(self.track_config.inner_boundary,
+                            facecolor='white',
+                            edgecolor='black',
+                            fill=True)
+        self.ax.add_patch(inner_track)
 
     def draw_obstacles(self):
         """Draw the obstacles"""
