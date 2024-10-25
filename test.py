@@ -334,7 +334,7 @@ class CarKinematics:
         # else:
         #     new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
         #     new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
-        print(f"new_x: {new_x}, new_y: {new_y}, new_theta: {new_theta}, steering_angle: {steering_angle}")
+        # print(f"new_x: {new_x}, new_y: {new_y}, new_theta: {new_theta}, steering_angle: {steering_angle}")
         return CarState(new_x, new_y, new_theta, steering_angle)
 
 class TrackVisualizer:
@@ -389,35 +389,50 @@ class TrackVisualizer:
         # Update car position and orientation
         transform = Affine2D() \
             .rotate(car_state.theta) \
-            .translate(car_state.x, car_state.y) \
-            .get_matrix()
-        self.car.set_transform(self.ax.transData + plt.matplotlib.transforms.Affine2D(transform))
+            .translate(car_state.x, car_state.y)
+
+        # Set the car's transform to the calculated affine transform
+        self.car.set_transform(transform + self.ax.transData)
+
+        # Redraw the plot
+        # self.ax.draw_artist(self.car)
+        # self.ax.figure.canvas.blit(self.ax.bbox)
+        # self.ax.figure.canvas.flush_events()
 
 def main():
-    """Main simulation function with visualization of LIDAR readings"""
-    # Define centerline points for a more rounded track
+    # Define centerline points for a larger, centered oval track
     centerline_points = [
-        (0, 0),
-        (2, 2),
-        (4, 2),
-        (5, 0),
-        (4, -2),
-        (2, -2),
-        (0, 0)
-    ]
-    track_width = 1.5
+    (-6.5, 0),       # Left center point
+    (-5.5, 3.5),     # Upper left curve
+    (-3, 6),         # Upper left
+    (0, 7),          # Top center
+    (3, 6),          # Upper right
+    (5.5, 3.5),      # Upper right curve
+    (6.5, 0),        # Right center point
+    (5.5, -3.5),     # Lower right curve
+    (3, -6),         # Lower right
+    (0, -7),         # Bottom center
+    (-3, -6),        # Lower left
+    (-5.5, -3.5),    # Lower left curve
+    (-6.5, 0)        # Back to start
+]
+    track_width = 2.0  # Increased track width for better visibility
     
     # Generate track boundaries
     inner_boundary, outer_boundary = generate_track_boundaries(centerline_points, track_width)
     
-    # Create track configuration with obstacles inside the track
+    # Create track configuration with better distributed obstacles
     track_config = TrackConfig(
         bounds=((-8, 8), (-8, 8)),
-        obstacles=[
-            (2, 0, 0.3),    # Center obstacle
-            (3, 1, 0.2),    # Upper right obstacle
-            (3, -1, 0.2),   # Lower right obstacle
-            (1, 1, 0.2),    # Upper left obstacle
+        obstacles = [
+        (-4, 5, 0.6),
+        (-2, 6, 0.3),
+        (1, 6.3, 0.5),
+        (4, 5, 0.4),
+        (6.3, 0, 0.4),
+        (5, -4, 0.2),
+        (0, -7, 0.3),
+        (-5, -4, 0.4),
         ],
         track_width=track_width,
         inner_boundary=inner_boundary,
@@ -441,7 +456,7 @@ def main():
     )
     kinematics = CarKinematics(
         car_length=car_length,
-        velocity=1.0,  # Reduced velocity for better control
+        velocity=2.0,  # Reduced velocity for better control
         dt=0.05,
         x_std=0.001,   # Reduced noise for smoother motion
         y_std=0.001,
@@ -462,10 +477,12 @@ def main():
     def init():
         """Initialize animation"""
         # Create empty line objects for trajectory and LIDAR visualization
-        trajectory_line, = visualizer.ax.plot([], [], 'g-', alpha=0.5, label='Trajectory')
+        trajectory_line, = visualizer.ax.plot([], [], 'g-', alpha=0.5,)
         lidar_lines = [visualizer.ax.plot([], [], 'r-', alpha=0.1)[0] 
                       for _ in range(lidar.num_beams)]
         
+        visualizer.ax.add_patch(visualizer.car)
+
         visualizer.ax.legend()
         return (visualizer.car, trajectory_line, *lidar_lines)
 
@@ -473,6 +490,9 @@ def main():
         """Update animation frame"""
         nonlocal car_state, trajectory, current_lidar_points
         
+
+        visualizer.ax.add_patch(visualizer.car)
+
         # Get LIDAR readings
         lidar_reading = lidar.get_readings(car_state, track_config)
 
