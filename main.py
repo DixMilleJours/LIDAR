@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle, Polygon
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 from matplotlib.transforms import Affine2D
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 import dataclasses
 
 # Explanation:
@@ -31,201 +31,280 @@ class TrackConfig:
     outer_boundary: np.ndarray  # Array of (x, y) points for outer boundary
 
 def generate_track_boundaries(centerline_points: List[Tuple[float, float]], track_width: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Generate inner and outer track boundaries from centerline points."""
+    """Generate inner and outer track boundaries from centerline points with consistent width."""
     points = np.array(centerline_points)
     inner_boundary = []
     outer_boundary = []
+    
+    # Ensure the track is closed by appending the first point if needed
+    if not np.array_equal(points[0], points[-1]):
+        points = np.append(points, [points[0]], axis=0)
 
-    # Convert points to numpy array for easier manipulation
-    points = np.array(points)
-
-    for i in range(len(points)):
-        # Get current point and next point (wrap around to first point if at end)
+    for i in range(len(points) - 1):
+        # Get current point and next point
         current = points[i]
-        next_point = points[(i + 1) % len(points)]
-
-        # Calculate direction vector
-        direction = next_point - current
-        direction = direction / np.linalg.norm(direction)
-
-        # Calculate normal vector (rotate direction 90 degrees)
-        normal = np.array([-direction[1], direction[0]])
-
+        next_point = points[i + 1]
+        
+        # Get previous point (wrap around to last point if at start)
+        prev_point = points[i - 1] if i > 0 else points[-2]
+        
+        # Calculate direction vectors
+        dir_to_next = next_point - current
+        dir_to_prev = current - prev_point
+        
+        # Normalize direction vectors
+        dir_to_next = dir_to_next / np.linalg.norm(dir_to_next)
+        dir_to_prev = dir_to_prev / np.linalg.norm(dir_to_prev)
+        
+        # Calculate average direction for smooth corners
+        avg_direction = dir_to_next + dir_to_prev
+        avg_direction = avg_direction / np.linalg.norm(avg_direction)
+        
+        # Calculate normal vector (rotate average direction 90 degrees)
+        normal = np.array([-avg_direction[1], avg_direction[0]])
+        
         # Generate inner and outer points
         inner_point = current - normal * (track_width / 2)
         outer_point = current + normal * (track_width / 2)
-
+        
         inner_boundary.append(inner_point)
         outer_boundary.append(outer_point)
     
+    # Add closing points
+    inner_boundary.append(inner_boundary[0])
+    outer_boundary.append(outer_boundary[0])
+    
     return np.array(inner_boundary), np.array(outer_boundary)
 
+@dataclasses.dataclass
+class LIDARReading:
+    distances: np.ndarray  # Array of distances for each beam
+    angles: np.ndarray    # Array of angles for each beam
+    hit_points: np.ndarray  # Array of (x,y) coordinates where each beam hits
+
 class LIDARSimulator:
-    """Placeholder for the LIDAR simulation component"""
-    def __init__(self, num_beams: int = 180, max_range: float = 10.0, angle_span: float = np.pi, 
-                car_height: float = 5, car_width: float = 5):
+    """
+    LIDAR simulation component that performs ray casting to detect obstacles and track boundaries.
+    Simulates a LIDAR sensor mounted on the front of the car.
+    """
+    def __init__(self, 
+                 num_beams: int = 180,
+                 max_range: float = 10.0,
+                 angle_span: float = np.pi,
+                 car_length: float = 5.0,
+                 car_width: float = 2.5,
+                 mount_offset: float = 0., # Offset from car front center
+                 ray_std: float = 0.01):  
+        """
+        Initialize the LIDAR simulator.
+        
+        Args:
+            num_beams: Number of LIDAR beams
+            max_range: Maximum detection range
+            angle_span: Angular span of the sensor in radians
+            car_length: Length of the car for mounting position
+            car_width: Width of the car for mounting position
+            mount_offset: Offset from car center (positive is right, negative is left)
+        """
         self.num_beams = num_beams
         self.max_range = max_range
         self.angle_span = angle_span
-        self.car_height = car_height
+        self.car_length = car_length
         self.car_width = car_width
+        self.mount_offset = mount_offset
+        self.ray_std = ray_std
+        
+        # Pre-calculate beam angles for efficiency
+        self.beam_angles = np.linspace(-angle_span/2, angle_span/2, num_beams)
+    
+    def get_sensor_position(self, car_state: 'CarState') -> np.ndarray:
+        """Calculate LIDAR sensor position based on car state."""
+        # Calculate offset from car's rear axle to sensor mounting point
+        x_offset = self.car_length * np.cos(car_state.theta)
+        y_offset = self.car_length * np.sin(car_state.theta)
+        
+        # Add lateral offset if sensor is not mounted at center
+        if self.mount_offset != 0:
+            lateral_x = -self.mount_offset * np.sin(car_state.theta)
+            lateral_y = self.mount_offset * np.cos(car_state.theta)
+            x_offset += lateral_x
+            y_offset += lateral_y
+            
+        return np.array([
+            car_state.x + x_offset,
+            car_state.y + y_offset
+        ])
 
-    def get_lidar_origin(self, car_state):
-        """Get lidar origin at front edge, equidistant from left and right side"""
+    def cast_ray(self, 
+                 origin: np.ndarray,
+                 angle: float,
+                 track_config: 'TrackConfig') -> Tuple[float, np.ndarray]:
+        """
+        Cast a single ray and find the closest intersection point.
+        
+        Returns:
+            Tuple of (distance, hit_point)
+        """
+        # Calculate ray endpoint at max range
+        direction = np.array([np.cos(angle), np.sin(angle)])
+        end_point = origin + direction * self.max_range
+        
+        closest_dist = self.max_range
+        closest_point = end_point.copy()
+        
+        # Check track boundary intersections
+        for boundary in [track_config.inner_boundary, track_config.outer_boundary]:
+            for i in range(len(boundary) - 1):
+                intersection = self._line_intersection(
+                    origin, end_point,
+                    boundary[i], boundary[i + 1]
+                )
+                if intersection is not None:
+                    dist = np.linalg.norm(intersection - origin)
+                    if dist < closest_dist:
+                        closest_dist = dist
+                        closest_point = intersection
 
-        # given that car position is measured from rear axle
-        x_offset = (self.car_height) * np.cos(car_state.theta)
-        y_offset = (self.car_height) * np.sin(car_state.theta)
+        # Check obstacle intersections
+        for obstacle in track_config.obstacles:
+            intersection = self._circle_intersection(
+                origin, end_point, 
+                np.array([obstacle[0], obstacle[1]]), obstacle[2]
+            )
+            if intersection is not None:
+                dist = np.linalg.norm(intersection - origin)
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_point = intersection
+                    
+        return closest_dist + np.random.normal(0, self.ray_std), closest_point
 
-        # add offset to given car position to locate sensor origin
-        lidar_pos = np.array([car_state.x + x_offset, car_state.y + y_offset])
+    def get_readings(self, car_state: 'CarState', track_config: 'TrackConfig') -> LIDARReading:
+        """Get LIDAR readings for the current car state and track configuration."""
+        sensor_pos = self.get_sensor_position(car_state)
+        
+        # Initialize arrays for storing results
+        distances = np.zeros(self.num_beams)
+        hit_points = np.zeros((self.num_beams, 2))
+        
+        # Calculate absolute angles by adding car's heading to relative angles
+        absolute_angles = self.beam_angles + car_state.theta
+        
+        # Cast rays for each beam
+        for i, angle in enumerate(absolute_angles):
+            distances[i], hit_points[i] = self.cast_ray(sensor_pos, angle, track_config)
+        
 
-        return lidar_pos
+        return LIDARReading(
+            distances=distances,
+            angles=self.beam_angles,  # Return relative angles for easier processing
+            hit_points=hit_points, 
+        )
 
-    def generate_rays(self, car_state, lidar_pos):
-        """Generate endpoints for each ray"""
-
-        # initial ray starting point
-        ray_endpoint = np.zeros((self.num_beams, 2))
-        ray_endpoint[:, 0] = lidar_pos[0]
-        ray_endpoint[:, 1] = lidar_pos[1]
-
-        # obtain angles at which rays occur at and offset by car angle
-        angles = np.linspace(0, self.angle_span, self.num_beams) + car_state.theta
-
-        # get coordinates of endpoints for each ray
-        for j in range(len(angles)):
-            ray_endpoint[j ,0] += self.max_range * np.cos(angles[j])
-            ray_endpoint[j ,1] += self.max_range * np.sin(angles[j])
-
-        return ray_endpoint
-
-    def boundary_intersection(self, p0, p1, p2, p3):
-        """Get intersection coordinates of the ray and the track edges (line segment)"""
-
-        # p0 and p1 define start and end of LIDAR ray
-        # p2 and p3 define start and end of boundary segment
+    def _line_intersection(self,
+                          ray_start: np.ndarray,
+                          ray_end: np.ndarray,
+                          line_start: np.ndarray,
+                          line_end: np.ndarray) -> Optional[np.ndarray]:
+        """Calculate intersection between ray and line segment using vector cross product."""
+        p0, p1 = ray_start, ray_end
+        p2, p3 = line_start, line_end
+        
         s1 = p1 - p0
         s2 = p3 - p2
-
-        # calculate determinant of sys of eq
-        det = -s1[0]*s2[1] + s2[0]*s1[1]
-
-        # if det = 0, parallel, no intersection; return max_range value
-        if det == 0: 
-            return self.max_range
-
-        # calculate t and u values at which the points intersect
-        t = ( -s2[1]*(p2[0] - p0[0]) + s2[0]*(p2[1] - p0[1]) )/det
-        u = ( s1[0]*(p2[1] - p2[1]) + s1[1]*(p2[0] - p0[0]) )/det
-
-        # calculate intersection point
-        if 0 <= u <= 1 and t >= 0:
-            POI = p0 + t*s1
-            return POI          # POI has x and y coordinates
         
-        # no intersection, return max_range
-        return self.max_range
-
-    def obstacle_intersection(self, p0, p1, obstacle):
-        """Get intersection coordinates of the ray and the obstacles"""
-
-        s = p1 - p0
-
-        # unpack obstacle center coordinates and radius
-        h = obstacle[0]; k = obstacle[1]; r = obstacle[2]
-
-        # calculate quadratic constants
-        A = s[0]^2 + s[1]^2
-        B = 2*( (p0[0] - h)*s[0] + (p0[1] - k)*s[1] )
-        C = ( (p0[0] - h)**2 + (p0[1] - k)**2 - r**2 )
-
-        discriminant = B**2 - 4*A*C
-
-        if discriminant < 0:        # if negative sqrt, no intersection, return max_range value
-            return self.max_range
-        if discriminant == 0:
-            t = -B / (2*A)
-        if discriminant > 0:
-            t1 = (-B + np.sqrt(discriminant)) / (2*A)
-            t2 = (-B - np.sqrt(discriminant)) / (2*A)
-            t = min(t1, t2)     # smaller t value intersects obstacle first
+        det = np.cross(s1, s2)
         
-        POI = p0 + t*s
-        return POI      # POI has x and y coordinates
-
-    def calc_distance(lidar_pos, POI):
-        """Calculate distance between two points"""
-
-        distance = np.sqrt( (POI[0] - lidar_pos[0])**2 + (POI[1] - lidar_pos[1])**2 )
-        return distance
-
-    def get_distances(self, car_state: CarState, track_config: TrackConfig) -> np.ndarray:
-        """Calculate the min distance between lidar origin and obstacles"""
-
-        # get lidar coordinates
-        lidar_pos = self.get_lidar_origin(self, car_state)
-
-        # generate rays
-        ray_endpoint = self.generate_rays(self, car_state)
-
-        # initialize bins with max_range values
-        dist = np.ones(self.num_beams) * self.max_range
-
-        for i in range(len(dist)):      # iterate over each ray
-            ray = ray_endpoint[i, :]
-
-            # check for intersecting points with inner boundary
-            for q in range(len(track_config.inner_boundary) - 1):   
-                POI = self.boundary_intersection(self, lidar_pos, ray, track_config.inner_boundary[q, :], 
-                                            track_config.inner_boundary[q + 1, :])
-                distance = self.calc_distance(lidar_pos, POI)
-
-                # take the minimum distance
-                dist[i] = min(dist[i], distance)
-
-            # check for intersecting points with outer boundary
-            for m in track_config.outer_boundary:
-                POI = self.boundary_intersection(self, lidar_pos, ray, track_config.outer_boundary[m, :], 
-                                            track_config.outer_boundary[m + 1, :])                
-                distance = self.calc_distance(lidar_pos, POI)
-
-                # take the minimum distance
-                dist[i] = min(dist[i], distance)
+        if abs(det) < 1e-10:  # Lines are parallel
+            return None
             
-            # check for intersecting points with obstacles (list)
-            for obst in track_config.obstacles:
-                POI = self.obstacle_intersection(self, lidar_pos, ray, obst)               
-                distance = self.calc_distance(lidar_pos, POI)
+        s = np.cross(p2 - p0, s2) / det
+        t = np.cross(p2 - p0, s1) / det
+        
+        if 0 <= s <= 1 and 0 <= t <= 1:
+            return p0 + s * s1
+        
+        return None
 
-                # take the minimum distance
-                dist[i] = min(dist[i], distance)
-
-        return dist
+    def _circle_intersection(self,
+                           ray_start: np.ndarray,
+                           ray_end: np.ndarray,
+                           circle_center: np.ndarray,
+                           circle_radius: float) -> Optional[np.ndarray]:
+        """Calculate intersection between ray and circle using quadratic equation."""
+        direction = ray_end - ray_start
+        direction = direction / np.linalg.norm(direction)
+        
+        oc = ray_start - circle_center
+        
+        a = 1  # Normalized direction vector
+        b = 2 * np.dot(direction, oc)
+        c = np.dot(oc, oc) - circle_radius * circle_radius
+        
+        discriminant = b * b - 4 * a * c
+        
+        if discriminant < 0:
+            return None
+            
+        t1 = (-b - np.sqrt(discriminant)) / (2 * a)
+        t2 = (-b + np.sqrt(discriminant)) / (2 * a)
+        
+        # Get smallest positive intersection
+        t = float('inf')
+        if t1 >= 0:
+            t = min(t, t1)
+        if t2 >= 0:
+            t = min(t, t2)
+            
+        if t == float('inf'):
+            return None
+            
+        return ray_start + direction * t
 
 class CarController:
-    def __init__(self, gap_threshold: float = 3.0, num_beams: int = 180, angle_span: float = np.pi):
+    def __init__(self, gap_threshold: float = 3.0, num_beams: int = 180, angle_span: float = np.pi, ratio: float = 0.95):
         self.gap_threshold = gap_threshold
         self.num_beams = num_beams
-        self.angle_span = angle_span
+        self.angle_span = angle_span  # This should match LIDAR's angle_span
+        self.ratio = ratio
 
     def get_steering_angle(self, lidar_data: np.ndarray) -> float:
+        # print(f"lidar_data: {lidar_data}")
         """Steer the car towards the maximum gap in the LIDAR data"""
-        # Get angle array for LIDAR data
-        angle_array = np.arange(start=-self.angle_span/2, stop=self.angle_span/2, step=self.angle_span/(self.num_beams-1))
-        if lidar_data.shape != angle_array.shape:
-            raise ValueError("LIDAR data shape must match angle array shape")
+        # Create angle array matching LIDAR's angle distribution
+        angle_array = np.linspace(-self.angle_span/2, self.angle_span/2, self.num_beams)
         
+        # Add shape check with more informative error message
+        if lidar_data.shape[0] != angle_array.shape[0]:
+            raise ValueError(f"LIDAR data shape {lidar_data.shape} must match angle array shape {angle_array.shape}")
+
         # Split LIDAR data into segments based on gap threshold
-        free_segments = np.split(lidar_data, np.where(lidar_data < self.gap_threshold)[0])
+        gaps = lidar_data > self.gap_threshold
+        gap_indices = np.where(gaps)[0]
+        
+        if len(gap_indices) == 0:
+            # If no gaps found, return neutral steering
+            return 0.0
+        
+        # Find the longest continuous gap
+        gap_diff = np.diff(gap_indices)
+        gap_starts = np.concatenate([[0], np.where(gap_diff > 1)[0] + 1])
+        gap_ends = np.concatenate([np.where(gap_diff > 1)[0], [len(gap_indices) - 1]])
+        
+        gap_lengths = gap_ends - gap_starts + 1
+        longest_gap_idx = np.argmax(gap_lengths)
+        start_idx = gap_indices[gap_starts[longest_gap_idx]]
+        end_idx = gap_indices[gap_ends[longest_gap_idx]]
+        
+        # Find the furthest point in the gap
+        best_idx = np.argmax(lidar_data[start_idx:end_idx+1]) + start_idx
 
-        # Find the longest free segment
-        max_gap = max(free_segments, key=len, default=[])
+        # Calculate center of the longest gap
+        center_idx = (start_idx + end_idx) // 2
 
-        # Find the center index of the longest free segment
-        start_idx = lidar_data.tolist().index(max_gap[0])
-        best_idx = int(start_idx + len(max_gap) / 2)
-        return angle_array[best_idx]
+        # Use a weighted average of the center and best points
+        steering_angle = angle_array[int(self.ratio*center_idx + (1-self.ratio)*best_idx)]
+        return steering_angle
 
 class CarKinematics:
     def __init__(self, car_length: float = 0.4, velocity: float = 1.0, dt: float = 0.05, x_std: float = 0.01, y_std: float = 0.01, theta_std: float = 0.01):
@@ -248,14 +327,9 @@ class CarKinematics:
 
         # Update state with Gaussian noise
         x, y, theta = current_state.x, current_state.y, current_state.theta
+        new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
+        new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
         new_theta = theta + self.velocity / self.car_length * np.tan(steering_angle) * self.dt + np.random.normal(0, self.theta_std)
-        if steering_angle == 0:
-            new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
-            new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
-        else:
-            new_x = x + self.car_length / np.tan(steering_angle) * (np.sin(theta + new_theta) - np.sin(theta)) + np.random.normal(0, self.x_std)
-            new_y = y + self.car_length / np.tan(steering_angle) * (np.cos(theta) - np.cos(theta + new_theta)) + np.random.normal(0, self.y_std)
-
         return CarState(new_x, new_y, new_theta, steering_angle)
 
 class TrackVisualizer:
@@ -285,15 +359,19 @@ class TrackVisualizer:
 
     def draw_track(self):
         """Draw the track with filled area between boundaries"""
-        # Create a polygon that represents the track
-        track_polygon = np.vstack([
-            self.track_config.outer_boundary,
-            np.flipud(self.track_config.inner_boundary)
-        ])
-
-        # Draw the track as a filled polygon
-        track = Polygon(track_polygon, facecolor='lightgray', edgecolor='black')
-        self.ax.add_patch(track)
+        # Draw outer boundary
+        outer_track = Polygon(self.track_config.outer_boundary,
+                            facecolor='lightgray',
+                            edgecolor='black',
+                            fill=True)
+        self.ax.add_patch(outer_track)
+        
+        # Draw inner boundary (the hole)
+        inner_track = Polygon(self.track_config.inner_boundary,
+                            facecolor='white',
+                            edgecolor='black',
+                            fill=True)
+        self.ax.add_patch(inner_track)
 
     def draw_obstacles(self):
         """Draw the obstacles"""
@@ -306,67 +384,177 @@ class TrackVisualizer:
         # Update car position and orientation
         transform = Affine2D() \
             .rotate(car_state.theta) \
-            .translate(car_state.x, car_state.y) \
-            .get_matrix()
-        self.car.set_transform(self.ax.transData + plt.matplotlib.transforms.Affine2D(transform))
+            .translate(car_state.x, car_state.y)
+
+        # Set the car's transform to the calculated affine transform
+        self.car.set_transform(transform + self.ax.transData)
+
+        # Redraw the plot
+        # self.ax.draw_artist(self.car)
+        # self.ax.figure.canvas.blit(self.ax.bbox)
+        # self.ax.figure.canvas.flush_events()
 
 def main():
-    # Define centerline points for the track
-    centerline_points = [(0, 0), (3, 3), (3, -3), (-3, -3), (-3, 3), (0, 0)]
-    track_width = 1.0  # Define track width
+    # Define centerline points for a larger, centered oval track 
+    centerline_points = [
+        (-6.5, 0),
+        (-6.5, 7), 
+        (6, 7), 
+        (6, 2), 
+        (5, 0), 
+        (3, -1), 
+        (-1, -1), 
+        (-2, -2), 
+        (-3, -4), 
+        (-4, -6), 
+        (-6.5, -6), 
+        (-6.5, 0)
+    ]
+
+    track_width = 2.0  # Increased track width for better visibility
     
     # Generate track boundaries
     inner_boundary, outer_boundary = generate_track_boundaries(centerline_points, track_width)
     
-    # Create track configuration
+    # Create track configuration with better distributed obstacles
     track_config = TrackConfig(
-        bounds=((-5, 5), (-5, 5)),
-        obstacles=[(2, 2, 0.5), (-2, -2, 0.5), (2, -2, 0.3)],
+        bounds=((-8, 8), (-8, 8)),
+        obstacles = [
+            (6.5, 6.5, 0.3), 
+            (-6.5, 6.5, 0.3), 
+            (-2, 6, 1), 
+            (1, 7.5, 0.5), 
+            (5.5, 7.5, 0.4), 
+            (6.5, 1.5, 0.5), 
+            (4, 0, 0.2), 
+            (-1.5, -1.5, 0.4), 
+            (-4.25, -5.5, 0.2), 
+            (-6.5, -6.5, 0.4),
+            (-6, -6, 0.1)
+        ],
         track_width=track_width,
         inner_boundary=inner_boundary,
         outer_boundary=outer_boundary
     )
 
-    # Initialize components
+    # Initialize components with tuned parameters
+    car_length = 0.1
+    angle_span = np.pi * 2/3    # 120 degree field of view
+    num_beams = 180
+    noise = 0.001
+
     visualizer = TrackVisualizer(track_config)
-    lidar = LIDARSimulator()
-    controller = CarController()
-    kinematics = CarKinematics()
+    lidar = LIDARSimulator(
+        num_beams=num_beams,
+        angle_span=angle_span,  
+        max_range=5.0,
+        car_length=car_length,
+        car_width=0.1, 
+        ray_std = 0.03
+    )
+    controller = CarController(
+        gap_threshold=0.25,
+        num_beams=num_beams,
+        angle_span=angle_span  # Match LIDAR's angle span
+    )
+    kinematics = CarKinematics(
+        car_length=car_length,
+        velocity=3,  # Reduced velocity for better control
+        dt=0.05,
+        x_std=noise,   # Reduced noise for smoother motion
+        y_std=noise,
+        theta_std=noise
+    )
 
-    # Initial car state
-    car_state = CarState(0, 0, 0)
+    # Initial car state - start at the beginning of the track
+    initial_heading = np.arctan2(
+        centerline_points[1][1] - centerline_points[0][1],
+        centerline_points[1][0] - centerline_points[0][0]
+    )
+    car_state = CarState(centerline_points[0][0], centerline_points[0][1], initial_heading)
 
+    # Create lists to store trajectory and LIDAR data for visualization
+    trajectory = [(car_state.x, car_state.y)]
+    current_lidar_points = None
+    
     def init():
         """Initialize animation"""
-        return (visualizer.car,)
+        # Create empty line objects for trajectory and LIDAR visualization
+        trajectory_line, = visualizer.ax.plot([], [], 'g-', alpha=0.5,)
+        lidar_lines = [visualizer.ax.plot([], [], 'r-', alpha=0.1)[0] 
+                      for _ in range(lidar.num_beams)]
+        
+        visualizer.ax.add_patch(visualizer.car)
+
+        visualizer.ax.legend()
+        return (visualizer.car, trajectory_line, *lidar_lines)
 
     def update(frame):
         """Update animation frame"""
-        nonlocal car_state
+        nonlocal car_state, trajectory, current_lidar_points
+        
 
-        # Get LIDAR data
-        lidar_data = lidar.get_distances(car_state, track_config)
+        visualizer.ax.add_patch(visualizer.car)
 
+        # Get LIDAR readings
+        lidar_reading = lidar.get_readings(car_state, track_config)
+   
         # Get steering decision
-        steering_angle = controller.get_steering_angle(lidar_data)
+        steering_angle = controller.get_steering_angle(lidar_reading.distances)
 
         # Update car state
-        car_state = kinematics.update_state(car_state, steering_angle, 0.05)
+        car_state = kinematics.update_state(car_state, steering_angle)
+
+        # Update trajectory
+        trajectory.append((car_state.x, car_state.y))
+        print(trajectory)
 
         # Update visualization
         visualizer.update_visualization(car_state)
-        return (visualizer.car,)
 
-    def savemp4(ani):
-        Writer = FFMpegWriter(fps=20, metadata=dict(artist='Me'), bitrate=1800)
-        ani.save("./animation.mp4", writer=Writer)
+        # Update trajectory line
+        trajectory_x, trajectory_y = zip(*trajectory)
+        trajectory_line = visualizer.ax.get_lines()[0]
+        trajectory_line.set_data(trajectory_x, trajectory_y)
 
-    # Create animation
-    ani = FuncAnimation(visualizer.fig, update, init_func=init,
-                       frames=500, interval=50, blit=True)
+        # Update LIDAR visualization
+        sensor_pos = lidar.get_sensor_position(car_state)
+        lidar_lines = visualizer.ax.get_lines()[1:]
 
+        for i, (line, hit_point) in enumerate(zip(lidar_lines, lidar_reading.hit_points)):
+            line.set_data([sensor_pos[0], hit_point[0]],
+                         [sensor_pos[1], hit_point[1]])
+
+        return (visualizer.car, trajectory_line, *lidar_lines)
+    
+
+    def save_animation(ani):
+        """Save animation to file with appropriate settings"""
+        Writer = FFMpegWriter(
+            fps=30,
+            metadata=dict(artist='LIDAR Simulation'),
+            bitrate=2000
+        )
+        ani.save("./lidar_simulation.mp4", writer=Writer)
+
+    # Create animation with adjusted parameters
+    ani = FuncAnimation(
+        visualizer.fig,
+        update,
+        init_func=init,
+        frames=500,
+        interval=20,  # Smaller interval for smoother animation
+        blit=True,
+        repeat=False  # Don't repeat the animation
+    )
+
+    # Set up the plot
+    visualizer.ax.set_title('LIDAR-based Navigation Simulation')
+    visualizer.ax.grid(True, alpha=0.3)
+
+    # Show plot and save animation
     plt.show()
-    savemp4(ani)
+    save_animation(ani)
 
 if __name__ == "__main__":
     main()
