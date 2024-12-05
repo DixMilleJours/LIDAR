@@ -226,6 +226,7 @@ class LIDARSimulator:
         
         return None
 
+    # need to update to calculate intersection of shapes that are also not circles
     def _circle_intersection(self,
                            ray_start: np.ndarray,
                            ray_end: np.ndarray,
@@ -375,8 +376,11 @@ class TrackVisualizer:
 
     def draw_obstacles(self):
         """Draw the obstacles"""
-        for x, y, radius in self.track_config.obstacles:
-            obstacle = Circle((x, y), radius, facecolor='gray', edgecolor='black')
+        for x, y, radius, shape in self.track_config.obstacles:
+            if shape == 'circle':
+                obstacle = Circle((x, y), radius, facecolor='gray', edgecolor='black')
+            elif shape == 'square':
+                obstacle = Rectangle((x, y),radius, radius, facecolor = 'gray', edgecolor = 'black')
             self.ax.add_patch(obstacle)
 
     def update_visualization(self, car_state: CarState):
@@ -397,18 +401,12 @@ class TrackVisualizer:
 def main():
     # Define centerline points for a larger, centered oval track 
     centerline_points = [
-        (-6.5, 0),
-        (-6.5, 7), 
-        (6, 7), 
-        (6, 2), 
-        (5, 0), 
-        (3, -1), 
-        (-1, -1), 
-        (-2, -2), 
-        (-3, -4), 
-        (-4, -6), 
-        (-6.5, -6), 
-        (-6.5, 0)
+        (-4, 0),
+        (-4, 4), 
+        (4, 4), 
+        (4, -4),
+        (-4, -4), 
+        (-4, 0)
     ]
 
     track_width = 2.0  # Increased track width for better visibility
@@ -418,19 +416,17 @@ def main():
     
     # Create track configuration with better distributed obstacles
     track_config = TrackConfig(
-        bounds=((-8, 8), (-8, 8)),
+        bounds=((-6, 6), (-6, 6)),
         obstacles = [
-            (6.5, 6.5, 0.3), 
-            (-6.5, 6.5, 0.3), 
-            (-2, 6, 1), 
-            (1, 7.5, 0.5), 
-            (5.5, 7.5, 0.4), 
-            (6.5, 1.5, 0.5), 
-            (4, 0, 0.2), 
-            (-1.5, -1.5, 0.4), 
-            (-4.25, -5.5, 0.2), 
-            (-6.5, -6.5, 0.4),
-            (-6, -6, 0.1)
+            (-3, 3, 1, 'circle'), 
+            (0, 4.5, -0.5, 'circle'), 
+            (4, 4, 0.25, 'circle'), 
+            (3, -1, 1, 'circle'), 
+            (3, -4.25, 0.25, 'square'),
+            (1, -3.75, 0.25, 'square'), 
+            (-1, -4.25, 0.25, 'square'), 
+            (-3, -3.75, 0.25, 'square'), 
+            (-4.75, -2, 0.5, 'circle')
         ],
         track_width=track_width,
         inner_boundary=inner_boundary,
@@ -439,8 +435,8 @@ def main():
 
     # Initialize components with tuned parameters
     car_length = 0.1
-    angle_span = np.pi * 2/3    # 120 degree field of view
-    num_beams = 180
+    angle_span = 2.97876403 # np.pi #* 2/3    # 120 degree field of view
+    num_beams = 205
     noise = 0.001
 
     visualizer = TrackVisualizer(track_config)
@@ -459,7 +455,7 @@ def main():
     )
     kinematics = CarKinematics(
         car_length=car_length,
-        velocity=3,  # Reduced velocity for better control
+        velocity=2,  # Reduced velocity for better control
         dt=0.05,
         x_std=noise,   # Reduced noise for smoother motion
         y_std=noise,
