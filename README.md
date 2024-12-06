@@ -1,4 +1,14 @@
 # LIDAR
+## Intro: simulating a LIDAR car that detects obstacles with ray-casting and drives on tracks.
+## Demo: 
+
+
+
+
+https://github.com/user-attachments/assets/4f619c71-2cf9-41fb-b616-cab1cd63bb4c
+
+
+
 ## Set-up
 1. Run `git clone git@github.com:DixMilleJours/LIDAR.git` in your directory.
 2. After that, open it locally. Run `git checkout -b replace_with_your_branch_name`. This creates your local branch.
