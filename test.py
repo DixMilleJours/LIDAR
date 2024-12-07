@@ -81,7 +81,6 @@ class LIDARReading:
     distances: np.ndarray  # Array of distances for each beam
     angles: np.ndarray    # Array of angles for each beam
     hit_points: np.ndarray  # Array of (x,y) coordinates where each beam hits
-    collisions: bool
 
 class LIDARSimulator:
     """
@@ -94,9 +93,8 @@ class LIDARSimulator:
                  angle_span: float = np.pi,
                  car_length: float = 5.0,
                  car_width: float = 2.5,
-                 mount_offset: float = 0., # Offset from car front center
-                 ray_std: float = 0.01, 
-                 collision_threshold: float = 0.1):  
+                 mount_offset: float = 0.0,
+                 noise_std: float = 0.1):
         """
         Initialize the LIDAR simulator.
         
@@ -115,8 +113,7 @@ class LIDARSimulator:
         self.car_length = car_length
         self.car_width = car_width
         self.mount_offset = mount_offset
-        self.ray_std = ray_std
-        self.collision_threshold = collision_threshold
+        self.noise_std = noise_std
         
         # Pre-calculate beam angles for efficiency
         self.beam_angles = np.linspace(-angle_span/2, angle_span/2, num_beams)
@@ -171,28 +168,22 @@ class LIDARSimulator:
 
         # Check obstacle intersections
         for obstacle in track_config.obstacles:
-            shape = obstacle[2]
-            if shape == "circle":
-                intersection = self._circle_intersection(
-                    origin, end_point, 
-                    obstacle[0], obstacle[1]
-                )
-            else:  # shape intersection
-                intersection = self._shape_intersection(
-                    origin, end_point, obstacle[0]
-                )
+            intersection = self._circle_intersection(
+                origin, end_point, 
+                np.array([obstacle[0], obstacle[1]]), obstacle[2]
+            )
             if intersection is not None:
                 dist = np.linalg.norm(intersection - origin)
                 if dist < closest_dist:
                     closest_dist = dist
                     closest_point = intersection
-
+        
         # Add Gaussian noise to distance measurements
-        closest_dist += np.random.normal(0, self.ray_std)
+        closest_dist += np.random.normal(0, self.noise_std)
 
         return closest_dist, closest_point
 
-    def get_readings(self, car_state: 'CarState', track_config: 'TrackConfig', collision_threshold) -> LIDARReading:
+    def get_readings(self, car_state: 'CarState', track_config: 'TrackConfig') -> LIDARReading:
         """Get LIDAR readings for the current car state and track configuration."""
         sensor_pos = self.get_sensor_position(car_state)
         
@@ -207,14 +198,10 @@ class LIDARSimulator:
         for i, angle in enumerate(absolute_angles):
             distances[i], hit_points[i] = self.cast_ray(sensor_pos, angle, track_config)
         
-        collision_threshold = self.collision_threshold
-        collision_detected = np.any(distances < collision_threshold)
-
         return LIDARReading(
             distances=distances,
             angles=self.beam_angles,  # Return relative angles for easier processing
-            hit_points=hit_points, 
-            collisions = collision_detected
+            hit_points=hit_points
         )
 
     def _line_intersection(self,
@@ -242,7 +229,6 @@ class LIDARSimulator:
         
         return None
 
-    # need to update to calculate intersection of shapes that are also not circles
     def _circle_intersection(self,
                            ray_start: np.ndarray,
                            ray_end: np.ndarray,
@@ -278,21 +264,6 @@ class LIDARSimulator:
             
         return ray_start + direction * t
 
-    def _shape_intersection(self, ray_start, ray_end, points):
-        closest_point = None
-        closest_dist = float('inf')
-        for i in range(len(points)-1):
-            line_start = np.array(points[i])
-            line_end = np.array(points[i+1])
-            intersection = self._line_intersection(ray_start, ray_end, line_start, line_end)
-            if intersection is not None:
-                dist = np.linalg.norm(intersection - ray_start)
-                if dist < closest_dist:
-                    closest_dist = dist
-                    closest_point = intersection
-
-        return closest_point
-
 class CarController:
     def __init__(self, gap_threshold: float = 3.0, num_beams: int = 180, angle_span: float = np.pi, ratio: float = 0.95):
         self.gap_threshold = gap_threshold
@@ -321,13 +292,12 @@ class CarController:
         gap_diff = np.diff(gap_indices)
         gap_starts = np.concatenate([[0], np.where(gap_diff > 1)[0] + 1])
         gap_ends = np.concatenate([np.where(gap_diff > 1)[0], [len(gap_indices) - 1]])
-    
         gap_lengths = gap_ends - gap_starts + 1
         longest_gap_idx = np.argmax(gap_lengths)
         start_idx = gap_indices[gap_starts[longest_gap_idx]]
         end_idx = gap_indices[gap_ends[longest_gap_idx]]
         
-        # Find the furthest point in the gap
+        # Find the furthest point in the longest gap
         best_idx = np.argmax(lidar_data[start_idx:end_idx+1]) + start_idx
 
         # Calculate center of the longest gap
@@ -335,11 +305,14 @@ class CarController:
 
         # Use a weighted average of the center and best points
         steering_angle = angle_array[int(self.ratio*center_idx + (1-self.ratio)*best_idx)]
-        
+
+        # Clip steering angle to avoid sharp turns
+        steering_angle = np.clip(steering_angle, -np.pi/4, np.pi/4)
+
         return steering_angle
 
 class CarKinematics:
-    def __init__(self, car_length: float = 0.4, velocity: float = 1.0, dt: float = 0.05, x_std: float = 0.01, y_std: float = 0.01, theta_std: float = 0.01):
+    def __init__(self, car_length: float = 0.4, velocity: float = 1.0, dt: float = 0.05, x_std: float = 0.05, y_std: float = 0.05, theta_std: float = 0.05):
         self.car_length = car_length
         self.velocity = velocity
         self.dt = dt
@@ -362,7 +335,7 @@ class CarKinematics:
         new_x = x + self.velocity * np.cos(theta) * self.dt + np.random.normal(0, self.x_std)
         new_y = y + self.velocity * np.sin(theta) * self.dt + np.random.normal(0, self.y_std)
         new_theta = theta + self.velocity / self.car_length * np.tan(steering_angle) * self.dt + np.random.normal(0, self.theta_std)
-        
+
         return CarState(new_x, new_y, new_theta, steering_angle)
 
 class TrackVisualizer:
@@ -408,11 +381,8 @@ class TrackVisualizer:
 
     def draw_obstacles(self):
         """Draw the obstacles"""
-        for coord, radius, shape in self.track_config.obstacles:
-            if shape == 'circle':
-                obstacle = Circle((coord[0], coord[1]), radius, facecolor='gray', edgecolor='black')
-            elif shape == 'polygon':
-                obstacle = Polygon(coord, facecolor = 'gray', edgecolor = 'black')
+        for x, y, radius in self.track_config.obstacles:
+            obstacle = Circle((x, y), radius, facecolor='gray', edgecolor='black')
             self.ax.add_patch(obstacle)
 
     def update_visualization(self, car_state: CarState):
@@ -431,17 +401,24 @@ class TrackVisualizer:
         # self.ax.figure.canvas.flush_events()
 
 def main():
-    # Define centerline points for a larger, centered oval track 
+    # Define centerline points for a larger, centered oval track
     centerline_points = [
-        (-4, 2), 
-        (-2, 4), 
-        (2, 4),
-        (4, 2), 
-        (4, -2),
-        (2, -4),
-        (-2, -4),
-        (-4, -2)
-        ]
+    (-6.5, 0),       # Left center point
+    (-5.5, 3.5),     # Upper left curve
+    (-3, 4),         # Upper left
+    (0, 4),          # Top center
+    (3, 4),          # Upper right
+    (5.5, 3.5),      # Upper right curve
+    (6.5, 0),        # Right center point
+    (5.5, -3.5),     # Lower right curve
+    (3, -3.5),         # Lower right
+    (1.5, -2),         # Bottom center
+    (0, -1),         # Bottom center
+    (-1.5, -2),         # Bottom center
+    (-3, -3.5),        # Lower left
+    (-5.5, -3.5),    # Lower left curve
+    (-6.5, 0)        # Back to start
+]
     track_width = 2.0  # Increased track width for better visibility
     
     # Generate track boundaries
@@ -449,43 +426,41 @@ def main():
     
     # Create track configuration with better distributed obstacles
     track_config = TrackConfig(
-        bounds=((-6, 6), (-6, 6)),
-            obstacles = [
-                ([-3.75, 3.75], 1, "circle"), 
-                ([(1.5, 4), (1.5, 5), (2.5, 5), (2.5, 4), (1.5, 4)], 0, "polygon")
-            ],
+        bounds=((-8, 8), (-8, 8)),
+        obstacles = [
+        (-3, 4.75, 0.25),
+        (-3, 4.25, 0.25),
+        (0, 3.25, 0.25),
+        (0, 3.75, 0.25),
+        (2.5, 4.25, 0.4),
+        ],
         track_width=track_width,
         inner_boundary=inner_boundary,
         outer_boundary=outer_boundary
     )
 
     # Initialize components with tuned parameters
-    car_length = 0.1
-    angle_span = np.pi * 2/3    # 120 degree field of view
-    num_beams = 120
-    noise = 0.001
-
+    car_length = 0.3
     visualizer = TrackVisualizer(track_config)
     lidar = LIDARSimulator(
-        num_beams=num_beams,
-        angle_span=angle_span,  
+        num_beams=100,
+        angle_span=np.pi,
         max_range=5.0,
         car_length=car_length,
-        car_width=0.1, 
-        ray_std = 0.03
+        car_width=0.2
     )
     controller = CarController(
-        gap_threshold=0.25,
-        num_beams=num_beams,
-        angle_span=angle_span  # Match LIDAR's angle span
+        gap_threshold=1.0,
+        num_beams=100,
+        angle_span=np.pi
     )
     kinematics = CarKinematics(
         car_length=car_length,
-        velocity=20,  # Reduced velocity for better control
+        velocity=3.0,  # Reduced velocity for better control
         dt=0.05,
-        x_std=noise,   # Reduced noise for smoother motion
-        y_std=noise,
-        theta_std=noise
+        x_std=0.001,   # Reduced noise for smoother motion
+        y_std=0.001,
+        theta_std=0.001
     )
 
     # Initial car state - start at the beginning of the track
@@ -519,8 +494,8 @@ def main():
         visualizer.ax.add_patch(visualizer.car)
 
         # Get LIDAR readings
-        lidar_reading = lidar.get_readings(car_state, track_config, collision_threshold=0)
-   
+        lidar_reading = lidar.get_readings(car_state, track_config)
+
         # Get steering decision
         steering_angle = controller.get_steering_angle(lidar_reading.distances)
 
@@ -529,7 +504,6 @@ def main():
 
         # Update trajectory
         trajectory.append((car_state.x, car_state.y))
-        print(trajectory)
 
         # Update visualization
         visualizer.update_visualization(car_state)
@@ -548,7 +522,6 @@ def main():
                          [sensor_pos[1], hit_point[1]])
 
         return (visualizer.car, trajectory_line, *lidar_lines)
-    
 
     def save_animation(ani):
         """Save animation to file with appropriate settings"""
